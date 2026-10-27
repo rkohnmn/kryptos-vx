@@ -1,0 +1,8 @@
+{
+  "name": "kryptos-vx",
+  "version": "1.0.0",
+  "description": "Zero-Bloat C++20 SIMD System Intelligence, De-Bloater & AI Context Engine",
+  "homepage": "https://github.com/velox-hq/velox",
+  "license": "MIT",
+  "dependencies": []
+}

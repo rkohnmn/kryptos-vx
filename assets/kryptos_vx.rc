@@ -1,0 +1,22 @@
+// KRYPTOS-VX Windows Native Desktop & Executable Icon Resource
+#define IDI_KRYPTOS_VX_ICON 101
+IDI_KRYPTOS_VX_ICON ICON "kryptos_vx.ico"
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName",      "KRYPTOS-VX Systems Engineering"
+            VALUE "FileDescription",  "KRYPTOS-VX Zero-Bloat C++20 SIMD System Intelligence & AI Context Engine"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "kryptos_vx.exe"
+            VALUE "OriginalFilename", "kryptos_vx.exe"
+            VALUE "ProductName",      "KRYPTOS-VX"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+END

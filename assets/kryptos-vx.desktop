@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=KRYPTOS-VX
+GenericName=SIMD System Intelligence, De-Bloater & AI Context Engine
+Comment=Zero-bloat C++20 SIMD workspace analyzer, secret scrubber, and Smart TV/OS de-bloater
+Exec=kryptos_vx tui
+Icon=kryptos_vx_logo
+Terminal=true
+Categories=Development;System;Utility;Security;
+Keywords=C++;SIMD;VibeCoding;Debloat;ContextPacker;
