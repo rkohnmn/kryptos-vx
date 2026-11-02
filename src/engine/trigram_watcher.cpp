@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <array>
+#include <thread>
 
 #if defined(__linux__)
     #include <poll.h>
@@ -283,8 +285,15 @@ int TrigramWatcherEngine::run_watcher_daemon(
     const std::string& root_dir,
     uint32_t max_events,
     uint32_t timeout_ms,
-    bool use_color
+    bool use_color,
+    WatcherTelemetry* telemetry,
+    std::function<void()> on_ready
 ) {
+    WatcherTelemetry local;
+    auto& report = telemetry ? *telemetry : local;
+    report = {};
+    std::error_code root_error;
+    if (!fs::is_directory(root_dir, root_error) || root_error) return 1;
     const char* cy  = use_color ? "\033[38;5;51m" : "";
     const char* gr  = use_color ? "\033[38;5;48m" : "";
     const char* b   = use_color ? "\033[1m"       : "";
@@ -302,6 +311,7 @@ int TrigramWatcherEngine::run_watcher_daemon(
               << initial_build_ms() << " ms" << rst << "\n";
 
 #if defined(__linux__)
+    report.backend = "Linux inotify";
     int inotify_fd = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (inotify_fd < 0) {
         std::cerr << "  [Warn] Failed to initialize Linux inotify descriptor.\n";
@@ -316,9 +326,8 @@ int TrigramWatcherEngine::run_watcher_daemon(
     constexpr uint32_t WATCH_MASK = IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_CLOSE_WRITE;
 
     int root_wd = ::inotify_add_watch(inotify_fd, root_p.c_str(), WATCH_MASK);
-    if (root_wd >= 0) {
-        wd_to_path[root_wd] = root_p;
-    }
+    if (root_wd < 0) { ::close(inotify_fd); return 1; }
+    wd_to_path[root_wd] = root_p;
 
     for (auto it = fs::recursive_directory_iterator(root_p, fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator(); it.increment(ec)) {
@@ -344,15 +353,16 @@ int TrigramWatcherEngine::run_watcher_daemon(
     pfd.fd = inotify_fd;
     pfd.events = POLLIN;
 
+    if (on_ready) on_ready();
     uint32_t processed = 0;
     alignas(struct inotify_event) char buf[8192];
 
     const auto start_wait = std::chrono::steady_clock::now();
-    while (processed < max_events) {
+    while (max_events == 0 || processed < max_events) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_wait
         ).count();
-        if (elapsed >= static_cast<long long>(timeout_ms)) break;
+        if (elapsed >= static_cast<long long>(timeout_ms)) { report.timed_out = true; break; }
 
         int remain_ms = static_cast<int>(timeout_ms - elapsed);
         int pret = ::poll(&pfd, 1, std::min(remain_ms, 200));
@@ -381,17 +391,138 @@ int TrigramWatcherEngine::run_watcher_daemon(
                                 (ev->mask & IN_CREATE) ? "CREATED" : "MODIFIED");
             }
             ++processed;
+            report.events_processed = processed;
             std::cout << "  [" << gr << m.event_type << rst << "] `" << m.relative_path << "` -> "
                       << m.trigrams_indexed << " trigrams updated in "
                       << cy << std::fixed << std::setprecision(3) << m.update_latency_ms << " ms" << rst << "\n";
-            if (processed >= max_events) break;
+            if (max_events != 0 && processed >= max_events) break;
         }
     }
 
     ::close(inotify_fd);
     return 0;
+#elif defined(_WIN32)
+    report.backend = "Windows ReadDirectoryChangesW";
+    std::array<DWORD, 16384> buffer{}; // DWORD alignment required by Win32
+    struct DirectoryWatch {
+        HANDLE directory{INVALID_HANDLE_VALUE};
+        HANDLE event{nullptr};
+        OVERLAPPED overlap{};
+        bool pending{false};
+        ~DirectoryWatch() {
+            if (pending) {
+                CancelIoEx(directory, &overlap);
+                DWORD ignored = 0;
+                GetOverlappedResult(directory, &overlap, &ignored, TRUE);
+            }
+            if (event) CloseHandle(event);
+            if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+        }
+    } watch;
+    const fs::path base = fs::absolute(root_dir);
+    watch.directory = CreateFileW(base.c_str(), FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+    if (watch.directory == INVALID_HANDLE_VALUE) return 1;
+    watch.event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!watch.event) return 1;
+    watch.overlap.hEvent = watch.event;
+    bool announced = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (max_events == 0 || report.events_processed < max_events) {
+        ResetEvent(watch.event);
+        if (!ReadDirectoryChangesW(watch.directory, buffer.data(), static_cast<DWORD>(sizeof(buffer)), TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
+            nullptr, &watch.overlap, nullptr)) return 1;
+        watch.pending = true;
+        if (!announced) { announced = true; if (on_ready) on_ready(); }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) { report.timed_out = true; break; }
+        const DWORD wait = WaitForSingleObject(watch.event, static_cast<DWORD>(remaining));
+        if (wait == WAIT_TIMEOUT) { report.timed_out = true; break; }
+        if (wait != WAIT_OBJECT_0) return 1;
+        DWORD bytes = 0;
+        if (!GetOverlappedResult(watch.directory, &watch.overlap, &bytes, FALSE)) return 1;
+        watch.pending = false;
+        if (bytes == 0) return 1; // overflow: never claim the index is current
+        size_t offset = 0;
+        while (offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) <= bytes) {
+            const auto* entry = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(reinterpret_cast<const char*>(buffer.data()) + offset);
+            if (entry->FileNameLength % sizeof(wchar_t) != 0 ||
+                entry->FileNameLength > bytes - offset - offsetof(FILE_NOTIFY_INFORMATION, FileName)) return 1;
+            const fs::path relative(std::wstring(entry->FileName, entry->FileNameLength / sizeof(wchar_t)));
+            const std::string key = relative.generic_string();
+            if (entry->Action == FILE_ACTION_REMOVED || entry->Action == FILE_ACTION_RENAMED_OLD_NAME) {
+                remove_file(key);
+                ++report.events_processed;
+            } else {
+                std::error_code ec;
+                const auto full = base / relative;
+                if (fs::is_regular_file(full, ec) && !ec) {
+                    upsert_file(full.string(), key, entry->Action == FILE_ACTION_ADDED ? "CREATED" : "MODIFIED");
+                    ++report.events_processed;
+                }
+            }
+            if (max_events != 0 && report.events_processed >= max_events) break;
+            if (entry->NextEntryOffset == 0) break;
+            if (entry->NextEntryOffset < offsetof(FILE_NOTIFY_INFORMATION, FileName) || entry->NextEntryOffset > bytes - offset) return 1;
+            offset += entry->NextEntryOffset;
+        }
+    }
+    return 0;
 #else
-    std::cout << "  • OS Event Backend    : Windows `ReadDirectoryChangesW` / Cross-Platform Watcher Ready\n";
+    report.backend = "Portable metadata polling (50 ms)";
+    using Stamp = std::pair<fs::file_time_type, uintmax_t>;
+    using Snapshot = std::unordered_map<std::string, Stamp>;
+    const auto base = fs::absolute(root_dir);
+    auto scan = [&](Snapshot& snapshot) {
+        std::error_code ec;
+        auto it = fs::recursive_directory_iterator(base, ec);
+        if (ec) return false;
+        for (; it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (ec) return false;
+            if (it->is_symlink(ec)) { it.disable_recursion_pending(); continue; }
+            if (it->is_directory(ec)) {
+                const auto name = it->path().filename().string();
+                if (name == ".git" || name == "build" || name == "node_modules") it.disable_recursion_pending();
+                continue;
+            }
+            if (!it->is_regular_file(ec)) continue;
+            const auto modified = it->last_write_time(ec);
+            if (ec) return false;
+            const auto size = it->file_size(ec);
+            if (ec) return false;
+            snapshot[it->path().lexically_relative(base).generic_string()] = {modified, size};
+        }
+        return !ec;
+    };
+    Snapshot previous;
+    if (!scan(previous)) return 1;
+    if (on_ready) on_ready();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_until(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(50)));
+        Snapshot current;
+        if (!scan(current)) return 1;
+        for (const auto& [path, stamp] : current) {
+            const auto old = previous.find(path);
+            if (old == previous.end() || old->second != stamp) {
+                upsert_file((base / path).string(), path, old == previous.end() ? "CREATED" : "MODIFIED");
+                ++report.events_processed;
+                if (max_events != 0 && report.events_processed >= max_events) return 0;
+            }
+        }
+        for (const auto& [path, stamp] : previous) {
+            (void)stamp;
+            if (!current.contains(path)) {
+                remove_file(path);
+                ++report.events_processed;
+                if (max_events != 0 && report.events_processed >= max_events) return 0;
+            }
+        }
+        previous = std::move(current);
+    }
+    report.timed_out = true;
     return 0;
 #endif
 }

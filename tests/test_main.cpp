@@ -350,29 +350,36 @@ KRYPTOS_VX_TEST(test_trigram_index_and_subms_incremental_update) {
 
 // 9. Phase 2 v1.5 "Kronos": Live OS Filesystem Watcher (`inotify` / Win32) Real-Time Event Loop
 KRYPTOS_VX_TEST(test_realtime_filesystem_watcher_daemon) {
-    kryptos::core::WorkspaceIndexSoA index;
-    index.index_directory(".", false, 2);
-
-    kryptos::engine::TrigramWatcherEngine watcher;
-    watcher.build_from_workspace(index);
-
     const TestDirectory temp;
-    const auto& watch_dir = temp.path();
-    const std::string watched_file = (watch_dir / "watch_probe_temp.txt").string();
-    std::jthread writer_thread([&watched_file]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
-        {
-            std::ofstream ofs(watched_file);
-            ofs << "KRONOS_REALTIME_INOTIFY_EVENT_PAYLOAD\n";
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
-        std::remove(watched_file.c_str());
-    });
-
-    int rc = watcher.run_watcher_daemon(watch_dir.string(), 2, 600, false);
-    writer_thread.join();
-    std::remove(watched_file.c_str());
-    KRYPTOS_VX_ASSERT(rc == 0);
+    const auto file = temp.path() / "watch_probe.txt";
+    kryptos::engine::TrigramWatcherEngine watcher;
+    auto observe = [&](auto mutation) {
+        std::promise<void> ready;
+        auto started = ready.get_future();
+        std::exception_ptr writer_error;
+        std::jthread writer([&] {
+            if (started.wait_for(std::chrono::seconds(5)) != std::future_status::ready) return;
+            try { mutation(); } catch (...) { writer_error = std::current_exception(); }
+        });
+        kryptos::engine::WatcherTelemetry report;
+        const int rc = watcher.run_watcher_daemon(temp.path().string(), 0, 400, false, &report, [&] { ready.set_value(); });
+        writer.join();
+        if (writer_error) std::rethrow_exception(writer_error);
+        KRYPTOS_VX_ASSERT(rc == 0);
+        KRYPTOS_VX_ASSERT(report.events_processed > 0);
+        KRYPTOS_VX_ASSERT(!report.backend.empty());
+    };
+    observe([&] { std::ofstream out(file); out << "watch_created_marker"; });
+    KRYPTOS_VX_ASSERT(watcher.query("watch_created_marker").total_matches == 1);
+    observe([&] { std::ofstream out(file); out << "watch_modified_marker_longer"; });
+    KRYPTOS_VX_ASSERT(watcher.query("watch_created_marker").total_matches == 0);
+    KRYPTOS_VX_ASSERT(watcher.query("watch_modified_marker_longer").total_matches == 1);
+    observe([&] { std::filesystem::remove(file); });
+    KRYPTOS_VX_ASSERT(watcher.query("watch_modified_marker_longer").total_matches == 0);
+    kryptos::engine::WatcherTelemetry idle;
+    KRYPTOS_VX_ASSERT(watcher.run_watcher_daemon(temp.path().string(), 1, 50, false, &idle) == 0);
+    KRYPTOS_VX_ASSERT(idle.events_processed == 0 && idle.timed_out);
+    KRYPTOS_VX_ASSERT(watcher.run_watcher_daemon((temp.path() / "missing").string(), 1, 50, false) == 1);
 }
 
 // 10. Phase 3 v2.0 "Aegis": Native C++20 MCP Server JSON-RPC 2.0 Stdio & 7 Sub-Millisecond Tools

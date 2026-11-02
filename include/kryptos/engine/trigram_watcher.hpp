@@ -10,6 +10,7 @@
 #include "kryptos/core/soa_index.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -37,6 +38,12 @@ struct IncrementalUpdateMetrics {
     std::string event_type;
     size_t trigrams_indexed{0};
     double update_latency_ms{0.0};
+};
+
+struct WatcherTelemetry {
+    std::string backend;
+    uint32_t events_processed{0};
+    bool timed_out{false};
 };
 
 class TrigramWatcherEngine {
@@ -77,13 +84,18 @@ public:
     // Sub-millisecond trigram-accelerated substring query across the indexed workspace
     [[nodiscard]] TrigramQueryResult query(std::string_view needle) const;
 
-    // Run native OS filesystem watcher daemon (`inotify` on Linux / `ReadDirectoryChangesW` on Windows)
-    // for a bounded duration or event count, logging < 1 ms incremental updates in real time.
+    // Linux inotify, Windows ReadDirectoryChangesW, or portable metadata polling
+    // (macOS). Returns 1 on setup/I/O failure, 0 on a bounded normal stop.
+    // max_events == 0 watches until timeout. Telemetry distinguishes an idle
+    // timeout from observed changes. on_ready runs synchronously after setup;
+    // callbacks must not throw. Do not query/mutate this engine concurrently.
     int run_watcher_daemon(
         const std::string& root_dir,
         uint32_t max_events = 5,
         uint32_t timeout_ms = 2500,
-        bool use_color = true
+        bool use_color = true,
+        WatcherTelemetry* telemetry = nullptr,
+        std::function<void()> on_ready = {}
     );
 
     [[nodiscard]] size_t indexed_doc_count() const noexcept { return docs_.size(); }

@@ -267,3 +267,18 @@ kryptos-vx/
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for complete terms. Built with pure modern C++20 and zero external runtime dependencies.
 
+
+### Filesystem watcher capabilities
+
+`watch` uses Linux inotify, recursive Windows ReadDirectoryChangesW, and a
+50 ms recursive metadata poll on macOS/other platforms. The portable backend
+detects files whose size or modification timestamp changed; it can miss a
+file created and deleted between polls or edits preserving both metadata fields.
+It is not an FSEvents implementation and does not promise sub-millisecond
+change detection. Incremental indexing time and change-detection latency are
+separate measurements.
+
+The engine returns nonzero on setup/I/O errors. `WatcherTelemetry` records the
+backend, processed events and idle timeouts. Its index is single-threaded: query
+it after a bounded watcher call returns. CI verifies create/edit/delete search
+results on all three operating systems, plus idle timeout and invalid roots.
