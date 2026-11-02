@@ -23,6 +23,11 @@
     #include <sys/stat.h>
     #include <sys/syscall.h>
     #include <unistd.h>
+#elif defined(__APPLE__) || defined(__MACH__)
+    #include <dirent.h>
+    #include <fcntl.h>
+    #include <sys/stat.h>
+    #include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -120,6 +125,7 @@ std::vector<KernelFileEntry> KernelFs::enumerate_std_filesystem(
 
         if (it->is_directory(ec)) {
             ++tel.directories_traversed;
+            ++tel.raw_syscalls_issued;
             if (should_skip_dir(fname, include_bloat_dirs)) {
                 it.disable_recursion_pending();
             }
@@ -158,18 +164,17 @@ std::vector<KernelFileEntry> KernelFs::enumerate_fast(
     bool include_bloat_dirs,
     KernelEnumTelemetry* telemetry_out
 ) {
-    const auto t0 = std::chrono::steady_clock::now();
     std::vector<KernelFileEntry> results;
     results.reserve(4096);
-
-    KernelEnumTelemetry tel{};
-    tel.io_uring_supported = probe_io_uring_support();
 
     std::error_code ec;
     const fs::path canon = fs::canonical(root_dir, ec);
     const std::string base_root = (ec ? fs::path(root_dir) : canon).generic_string();
 
 #if defined(__linux__) && defined(SYS_getdents64)
+    const auto t0 = std::chrono::steady_clock::now();
+    KernelEnumTelemetry tel{};
+    tel.io_uring_supported = probe_io_uring_support();
     tel.backend = KernelEnumBackend::LinuxGetdents64Statx;
 
     struct DirWorkItem {
@@ -266,6 +271,9 @@ std::vector<KernelFileEntry> KernelFs::enumerate_fast(
     return results;
 
 #elif defined(_WIN32)
+    const auto t0 = std::chrono::steady_clock::now();
+    KernelEnumTelemetry tel{};
+    tel.io_uring_supported = probe_io_uring_support();
     tel.backend = KernelEnumBackend::WindowsNtfsUsnOrLargeFetch;
 
     // Probe NTFS volume handle for Direct $MFT / USN Journal capability (`FSCTL_QUERY_USN_JOURNAL`)

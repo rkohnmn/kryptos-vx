@@ -45,13 +45,19 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance & Multi-ISA SIMD Interface (AVX-512 / AVX2 / ARM64 NEON)
 # ─────────────────────────────────────────────────────────────────────────────
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i686|i386)$")
+    set(KRYPTOS_IS_X86 TRUE)
+else()
+    set(KRYPTOS_IS_X86 FALSE)
+endif()
+
 add_library(kryptos_vx_optimization INTERFACE)
-if(ENABLE_AVX512)
+if(KRYPTOS_IS_X86 AND ENABLE_AVX512)
     target_compile_options(kryptos_vx_optimization INTERFACE
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-mavx512f -mavx512bw -mavx2 -mfma>
         $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX512>
     )
-elseif(ENABLE_AVX2)
+elseif(KRYPTOS_IS_X86 AND ENABLE_AVX2)
     target_compile_options(kryptos_vx_optimization INTERFACE
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-mavx2 -mfma>
         $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
@@ -130,7 +136,11 @@ if(BUILD_TESTING)
     enable_testing()
     add_executable(kryptos_vx_tests tests/test_main.cpp)
     target_link_libraries(kryptos_vx_tests PRIVATE kryptos_vx_core kryptos_vx_warnings kryptos_vx_optimization kryptos_vx_sanitizers)
-    add_test(NAME KryptosVXUnitTests COMMAND kryptos_vx_tests)
+    add_test(
+        NAME KryptosVXUnitTests
+        COMMAND kryptos_vx_tests
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 endif()
 
 if(BUILD_BENCHMARKS)
