@@ -28,3 +28,23 @@ jobs:
 
       - name: Run Unit Tests
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --parallel
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ASan and UBSan
+        run: cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON -DBUILD_BENCHMARKS=OFF
+      - name: Build instrumented tests
+        run: cmake --build build-sanitized --parallel 2
+      - name: Run memory and undefined-behavior checks
+        run: ctest --test-dir build-sanitized --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sanitizer-test-log
+          path: build-sanitized/Testing/Temporary/LastTest.log

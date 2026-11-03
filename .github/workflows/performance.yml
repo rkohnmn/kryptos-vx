@@ -1,0 +1,27 @@
+name: Performance samples
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  release-samples:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Release samples
+        run: cmake -S . -B build-perf -DCMAKE_BUILD_TYPE=Release -DBUILD_PERFORMANCE_SAMPLES=ON
+      - name: Build sampling executable
+        run: cmake --build build-perf --target kryptos_perf_samples --parallel 2
+      - name: Collect warm-up and 21 measured samples
+        run: python3 scripts/collect_performance.py build-perf/kryptos_perf_samples build-perf/performance.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-performance
+          path: |
+            build-perf/performance.json
+            build-perf/CMakeCache.txt
+          if-no-files-found: error

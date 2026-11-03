@@ -147,3 +147,11 @@ if(BUILD_BENCHMARKS)
     add_executable(kryptos_vx_bench benchmarks/bench_main.cpp)
     target_link_libraries(kryptos_vx_bench PRIVATE kryptos_vx_core kryptos_vx_warnings kryptos_vx_optimization)
 endif()
+
+# Dedicated fixed-fixture samples, separate from correctness smoke limits.
+option(BUILD_PERFORMANCE_SAMPLES "Build repeated performance sampling tool" OFF)
+if(BUILD_PERFORMANCE_SAMPLES)
+    add_executable(kryptos_perf_samples benchmarks/perf_samples.cpp)
+    target_link_libraries(kryptos_perf_samples PRIVATE kryptos_vx_core)
+    target_compile_definitions(kryptos_perf_samples PRIVATE PERF_BUILD_TYPE="$<CONFIG>" PERF_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+endif()
