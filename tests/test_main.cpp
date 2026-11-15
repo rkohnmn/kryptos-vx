@@ -410,6 +410,23 @@ KRYPTOS_VX_TEST(test_mcp_server_jsonrpc_and_subms_tools) {
     KRYPTOS_VX_ASSERT(tel_call.execution_latency_ms < 250.0);
 }
 
+// Malformed peer input must never throw or allocate according to an untrusted size.
+KRYPTOS_VX_TEST(test_mcp_rejects_oversized_and_malformed_frames) {
+    kryptos::engine::McpServer mcp(".");
+    for (const auto& number : {"not-a-number", "184467440737095516160", "100001", "0"}) {
+        std::string msg = std::string(R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kryptos_pack_context","arguments":{"max_tokens":")") + number + R"("}}})";
+        const auto response = mcp.handle_jsonrpc_message(msg);
+        KRYPTOS_VX_ASSERT(response.find("\"error\"") != std::string::npos);
+    }
+    std::string too_long(1024 * 1024 + 1, 'x');
+    KRYPTOS_VX_ASSERT(mcp.handle_jsonrpc_message(too_long).find("\"error\"") != std::string::npos);
+    std::istringstream framed("Content-Length: 999999999999999999999999999999\r\n\r\n");
+    std::ostringstream output;
+    KRYPTOS_VX_ASSERT(mcp.run_stdio_loop(framed, output) == 1);
+    std::istringstream truncated("Content-Length: 100\r\n\r\n{}\n");
+    KRYPTOS_VX_ASSERT(mcp.run_stdio_loop(truncated, output) == 1);
+}
+
 // 11. Phase 3 v2.0 "Aegis": MCP Server Live Loopback TCP Socket Transport Test
 KRYPTOS_VX_TEST(test_mcp_server_tcp_socket_transport) {
 #if !defined(_WIN32)
@@ -632,6 +649,26 @@ KRYPTOS_VX_TEST(test_kvxd_binary_delta_patch_reconstruction) {
     KRYPTOS_VX_ASSERT(reconstructed == updated_v2);
 }
 
+// KVXD must never accept truncated, unknown-opcode or forged-length patches.
+KRYPTOS_VX_TEST(test_kvxd_rejects_corrupt_patch_headers) {
+    using kryptos::engine::FastCdcSync;
+    const std::string base = "hello world";
+    const std::string updated = "hello again world";
+    const std::string valid = FastCdcSync::build_delta_patch(base, updated);
+    KRYPTOS_VX_ASSERT(FastCdcSync::apply_delta_patch(base, valid) == updated);
+    for (size_t n = 0; n < valid.size(); ++n) {
+        KRYPTOS_VX_ASSERT(FastCdcSync::apply_delta_patch(base, valid.substr(0, n)).empty());
+    }
+    std::string forged = valid;
+    std::fill(forged.begin() + 4, forged.begin() + 12, char{0x7f});
+    KRYPTOS_VX_ASSERT(FastCdcSync::apply_delta_patch(base, forged).empty());
+    std::string too_many = valid;
+    std::fill(too_many.begin() + 12, too_many.begin() + 16, char{0x7f});
+    KRYPTOS_VX_ASSERT(FastCdcSync::apply_delta_patch(base, too_many).empty());
+    std::string trailing = valid + "noise";
+    KRYPTOS_VX_ASSERT(FastCdcSync::apply_delta_patch(base, trailing).empty());
+}
+
 // 17. Phase 4 v3.0 "Apex": Cross-Device TCP/LAN Zero-Copy Sync Wire Protocol Session
 KRYPTOS_VX_TEST(test_cross_device_tcp_lan_zero_copy_sync) {
     constexpr size_t SZ = 384 * 1024;
@@ -686,12 +723,14 @@ int main() {
     KRYPTOS_VX_RUN_TEST(test_trigram_index_and_subms_incremental_update);
     KRYPTOS_VX_RUN_TEST(test_realtime_filesystem_watcher_daemon);
     KRYPTOS_VX_RUN_TEST(test_mcp_server_jsonrpc_and_subms_tools);
+    KRYPTOS_VX_RUN_TEST(test_mcp_rejects_oversized_and_malformed_frames);
     KRYPTOS_VX_RUN_TEST(test_mcp_server_tcp_socket_transport);
     KRYPTOS_VX_RUN_TEST(test_adb_wire_protocol_and_smart_tv_bridge);
     KRYPTOS_VX_RUN_TEST(test_fastcdc_shift_resilience_vs_fixed_blocks);
     KRYPTOS_VX_RUN_TEST(test_elf64_binary_section_profiler_and_diff);
     KRYPTOS_VX_RUN_TEST(test_pe64_and_macho64_binary_parsers);
     KRYPTOS_VX_RUN_TEST(test_kvxd_binary_delta_patch_reconstruction);
+    KRYPTOS_VX_RUN_TEST(test_kvxd_rejects_corrupt_patch_headers);
     KRYPTOS_VX_RUN_TEST(test_cross_device_tcp_lan_zero_copy_sync);
     KRYPTOS_VX_RUN_TEST(test_elf64_symbol_table_hotspot_extraction);
 

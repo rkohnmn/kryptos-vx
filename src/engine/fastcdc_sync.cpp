@@ -233,6 +233,9 @@ std::string FastCdcSync::apply_delta_patch(
     uint32_t num_chunks = 0;
     std::memcpy(&total_target_sz, patch_blob.data() + 4, sizeof(uint64_t));
     std::memcpy(&num_chunks, patch_blob.data() + 12, sizeof(uint32_t));
+    // A chunk opcode occupies at least five bytes. Reject impossible manifests
+    // before parsing the base or allocating reconstruction storage.
+    if (num_chunks > (patch_blob.size() - 16) / 5) return {};
 
     size_t min_c = 0, avg_c = 0, max_c = 0;
     select_chunk_params(std::max<size_t>(base_data.size(), total_target_sz), min_c, avg_c, max_c);
@@ -246,33 +249,42 @@ std::string FastCdcSync::apply_delta_patch(
         base_map.emplace(c.content_hash64, c);
     }
 
+    // Never trust the claimed size as a reserve() argument. A 16-byte forged
+    // header must not trigger a multi-gigabyte allocation.
     std::string reconstructed;
-    reconstructed.reserve(total_target_sz);
+    reconstructed.reserve(static_cast<size_t>(std::min<uint64_t>(total_target_sz, 1u << 20)));
 
     size_t pos = 16;
-    for (uint32_t i = 0; i < num_chunks && pos < patch_blob.size(); ++i) {
+    for (uint32_t i = 0; i < num_chunks; ++i) {
+        if (pos >= patch_blob.size()) return {};
         const uint8_t op = static_cast<uint8_t>(patch_blob[pos++]);
         if (op == OP_MATCH_CHUNK) {
-            if (pos + sizeof(uint64_t) > patch_blob.size()) break;
+            if (patch_blob.size() - pos < sizeof(uint64_t)) return {};
             uint64_t h64 = 0;
             std::memcpy(&h64, patch_blob.data() + pos, sizeof(uint64_t));
             pos += sizeof(uint64_t);
 
             auto it = base_map.find(h64);
-            if (it != base_map.end()) {
-                reconstructed.append(base_data.data() + it->second.offset, it->second.length);
-            }
+            if (it == base_map.end() ||
+                it->second.length > total_target_sz - std::min<uint64_t>(reconstructed.size(), total_target_sz))
+                return {};
+            reconstructed.append(base_data.data() + it->second.offset, it->second.length);
         } else if (op == OP_LITERAL_CHUNK) {
-            if (pos + sizeof(uint32_t) > patch_blob.size()) break;
+            if (patch_blob.size() - pos < sizeof(uint32_t)) return {};
             uint32_t clen = 0;
             std::memcpy(&clen, patch_blob.data() + pos, sizeof(uint32_t));
             pos += sizeof(uint32_t);
-            if (pos + clen > patch_blob.size()) break;
+            if (clen > patch_blob.size() - pos ||
+                clen > total_target_sz - std::min<uint64_t>(reconstructed.size(), total_target_sz))
+                return {};
             reconstructed.append(patch_blob.data() + pos, clen);
             pos += clen;
+        } else {
+            return {};
         }
     }
 
+    if (pos != patch_blob.size() || reconstructed.size() != total_target_sz) return {};
     return reconstructed;
 }
 
