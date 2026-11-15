@@ -13,6 +13,7 @@
 #include "kryptos/ui/brand_logo.hpp"
 #include "kryptos/ui/tui_dashboard.hpp"
 
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
@@ -32,6 +33,12 @@
 #endif
 
 namespace kryptos::engine {
+
+namespace {
+// The server is local-only, but stdio and loopback clients are still untrusted.
+constexpr size_t kMaxRpcMessageBytes = 1024 * 1024;
+constexpr size_t kMaxContextTokens = 100000;
+}
 
 McpServer::McpServer(const std::string& workspace_root)
     : workspace_root_(workspace_root) {
@@ -143,7 +150,7 @@ std::string McpServer::extract_json_id(std::string_view json) {
 
 JsonRpcRequest McpServer::parse_jsonrpc_request(std::string_view raw_json) {
     JsonRpcRequest req{};
-    if (raw_json.empty()) return req;
+    if (raw_json.empty() || raw_json.size() > kMaxRpcMessageBytes) return req;
 
     req.id_raw = extract_json_id(raw_json);
     req.method = extract_json_string(raw_json, "method");
@@ -167,7 +174,15 @@ JsonRpcRequest McpServer::parse_jsonrpc_request(std::string_view raw_json) {
 
     const std::string max_tok_str = extract_json_string(params_view, "max_tokens");
     if (!max_tok_str.empty()) {
-        req.max_tokens_arg = static_cast<size_t>(std::stoull(max_tok_str));
+        size_t requested = 0;
+        const auto [end, err] = std::from_chars(
+            max_tok_str.data(), max_tok_str.data() + max_tok_str.size(), requested);
+        if (err != std::errc{} || end != max_tok_str.data() + max_tok_str.size() ||
+            requested == 0 || requested > kMaxContextTokens) {
+            req.valid = false;
+            return req;
+        }
+        req.max_tokens_arg = requested;
     }
     if (params_view.find("\"skeleton\":true") != std::string_view::npos ||
         params_view.find("\"skeleton\": true") != std::string_view::npos) {
@@ -352,7 +367,16 @@ std::string McpServer::handle_jsonrpc_message(
 
 int McpServer::run_stdio_loop(std::istream& in, std::ostream& out) {
     std::string line;
-    while (std::getline(in, line)) {
+    for (;;) {
+        line.clear();
+        char ch = 0;
+        // std::getline into std::string has no size ceiling; read with a cap.
+        while (in.get(ch) && ch != '
+') {
+            if (line.size() >= kMaxRpcMessageBytes) return 1;
+            line.push_back(ch);
+        }
+        if (!in && line.empty()) break;
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
@@ -360,17 +384,25 @@ int McpServer::run_stdio_loop(std::istream& in, std::ostream& out) {
 
         // Support both Content-Length LSP framing and newline-delimited JSON-RPC
         if (line.starts_with("Content-Length:")) {
-            const size_t len = static_cast<size_t>(std::stoull(line.substr(15)));
-            // Consume blank separator line
+            std::string_view field(line);
+            field.remove_prefix(15);
+            while (!field.empty() && (field.front() == ' ' || field.front() == '\t'))
+                field.remove_prefix(1);
+            size_t len = 0;
+            const auto [end, err] = std::from_chars(field.data(), field.data() + field.size(), len);
+            if (err != std::errc{} || end != field.data() + field.size() ||
+                len > kMaxRpcMessageBytes) return 1;
+            // Validate the frame separator before allocating or dispatching.
             std::string sep;
-            std::getline(in, sep);
+            if (!std::getline(in, sep) || (sep != "" && sep != "\r")) return 1;
             std::string body(len, '\0');
-            in.read(body.data(), static_cast<std::streamsize>(len));
+            if (!in.read(body.data(), static_cast<std::streamsize>(len))) return 1;
             std::string reply = handle_jsonrpc_message(body);
             if (!reply.empty()) {
                 out << "Content-Length: " << reply.size() << "\r\n\r\n" << reply << std::flush;
             }
         } else if (line.front() == '{') {
+            if (line.size() > kMaxRpcMessageBytes) return 1;
             std::string reply = handle_jsonrpc_message(line);
             if (!reply.empty()) {
                 out << reply << "\n" << std::flush;
@@ -423,6 +455,9 @@ int McpServer::run_tcp_server(uint16_t port, size_t max_requests, uint16_t* boun
         while (true) {
             ssize_t n = ::recv(cli_fd, buf, sizeof(buf), 0);
             if (n <= 0) break;
+            // Bound an unterminated line as well as an individual RPC message.
+            if (static_cast<size_t>(n) > kMaxRpcMessageBytes ||
+                accum.size() > kMaxRpcMessageBytes - static_cast<size_t>(n)) break;
             accum.append(buf, static_cast<size_t>(n));
 
             size_t nl_pos = 0;
