@@ -371,8 +371,7 @@ int McpServer::run_stdio_loop(std::istream& in, std::ostream& out) {
         line.clear();
         char ch = 0;
         // std::getline into std::string has no size ceiling; read with a cap.
-        while (in.get(ch) && ch != '
-') {
+        while (in.get(ch) && ch != '\n') {
             if (line.size() >= kMaxRpcMessageBytes) return 1;
             line.push_back(ch);
         }
